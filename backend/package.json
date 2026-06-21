@@ -1,0 +1,45 @@
+{
+  "name": "ui-stream",
+  "private": true,
+  "version": "0.0.0",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node -r dotenv/config src/server.ts",
+    "start": "node dist/server.js",
+    "stop": "pkill -f 'node dist/server.js' || true",
+    "test": "vitest --run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.782",
+    "@aws-sdk/client-bedrock-runtime": "^3.785",
+    "@aws-sdk/client-dynamodb": "^3.868.0",
+    "@aws-sdk/client-s3": "^3.785",
+    "@aws-sdk/credential-providers": "^3.782",
+    "@aws-sdk/lib-dynamodb": "^3.868.0",
+    "@aws-sdk/s3-request-presigner": "^3.785",
+    "@smithy/node-http-handler": "^4.1.0",
+    "@smithy/types": "^4.1.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.9",
+    "amazon-cognito-identity-js": "^6.3.16",
+    "aws-jwt-verify": "^4.0.1",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.4.1",
+    "rxjs": "^7.8.2",
+    "socket.io": "^4.8.1",
+    "ts-node": "^10.9.2"
+  },
+  "overrides": {
+    "rollup": "^4.59.1",
+    "fast-xml-parser": "^5.5.9",
+    "js-cookie": ">=3.0.6"
+  },
+  "devDependencies": {
+    "fast-check": "^4.5.3",
+    "typescript": "^5.0.0",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nova Sonic Resources</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: #F3F4F6;
+      color: #111827;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #2563EB;
+      border-bottom: 1px solid #1D4ED8;
+      padding: 0 1.5rem;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      box-shadow: 0 2px 8px rgb(37 99 235 / 0.25);
+      flex-shrink: 0;
+    }
+
+    .logo-section {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: #fff;
+    }
+
+    .logo-section i { font-size: 1.1rem; }
+    .logo-section h1 { font-size: 1rem; font-weight: 700; letter-spacing: -0.02em; }
+
+    main {
+      flex: 1;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 2rem 1.5rem;
+    }
+
+    .container { width: 100%; max-width: 860px; }
+
+    .page-heading {
+      margin-bottom: 1.5rem;
+      padding-bottom: 1.25rem;
+      border-bottom: 1px solid #E5E7EB;
+    }
+
+    .page-heading h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #111827;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .page-heading h2 i { color: #2563EB; }
+
+    .page-heading p {
+      font-size: 0.875rem;
+      color: #6B7280;
+    }
+
+    .card {
+      background: #FFFFFF;
+      border: 1px solid #E5E7EB;
+      border-radius: 16px;
+      box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08);
+      padding: 2rem;
+      margin-bottom: 1rem;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+
+    .card:hover {
+      border-color: #BFDBFE;
+      box-shadow: 0 4px 6px -1px rgb(37 99 235 / 0.1);
+    }
+
+    .card-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 10px;
+      background: #EFF6FF;
+      border: 1px solid #BFDBFE;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      color: #2563EB;
+      font-size: 1.25rem;
+    }
+
+    .card-body { flex: 1; min-width: 0; }
+
+    .card-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #2563EB;
+      margin-bottom: 0.3rem;
+    }
+
+    .card-title {
+      font-size: 1.125rem;
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 0.3rem;
+      line-height: 1.35;
+    }
+
+    .card-url {
+      font-size: 0.875rem;
+      color: #9CA3AF;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .card-qr {
+      flex-shrink: 0;
+      width: 140px;
+      height: 140px;
+      border-radius: 8px;
+      border: 1px solid #E5E7EB;
+      background: #fff;
+    }
+
+    .card-qr img { display: block; width: 140px; height: 140px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo-section">
+      <i class="fas fa-headset"></i>
+      <h1>NextGen Agent Trainer</h1>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      <div class="page-heading">
+        <h2><i class="fas fa-microphone-lines"></i> Nova Sonic &amp; Voice AI Resources</h2>
+        <p>Explore the technology powering this demo</p>
+      </div>
+
+      <a class="card" href="https://docs.aws.amazon.com/nova/latest/userguide/speech.html" target="_blank" rel="noopener">
+        <div class="card-icon"><i class="fas fa-book-open"></i></div>
+        <div class="card-body">
+          <div class="card-label">Documentation</div>
+          <div class="card-title">Using the Amazon Nova Sonic Speech-to-Speech model</div>
+          <div class="card-url">docs.aws.amazon.com/nova/latest/userguide/speech.html</div>
+        </div>
+        <div class="card-qr"><img src="./qrcode-sonic-userguide.png" alt="QR code" /></div>
+      </a>
+
+      <a class="card" href="https://github.com/aws-samples/amazon-nova-samples/tree/main/speech-to-speech/amazon-nova-2-sonic" target="_blank" rel="noopener">
+        <div class="card-icon"><i class="fab fa-github"></i></div>
+        <div class="card-body">
+          <div class="card-label">Code Samples</div>
+          <div class="card-title">Amazon Nova 2 Sonic code samples</div>
+          <div class="card-url">github.com/aws-samples/amazon-nova-samples</div>
+        </div>
+        <div class="card-qr"><img src="./qrcode-sonic-samples.png" alt="QR code" /></div>
+      </a>
+
+      <a class="card" href="https://catalog.us-east-1.prod.workshops.aws/workshops/5238419f-1337-4e0f-8cd7-02239486c40d/en-US" target="_blank" rel="noopener">
+        <div class="card-icon"><i class="fas fa-graduation-cap"></i></div>
+        <div class="card-body">
+          <div class="card-label">Workshop</div>
+          <div class="card-title">Amazon Nova Sonic 2 (speech-to-speech) Workshop</div>
+          <div class="card-url">catalog.us-east-1.prod.workshops.aws</div>
+        </div>
+        <div class="card-qr"><img src="./qrcode-sonic-workshop.png" alt="QR code" /></div>
+      </a>
+    </div>
+  </main>
+</body>
+</html>

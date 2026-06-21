@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+backend/dist/
+frontend/dist/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+credentials
+.aws/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Auto-generated config (contains runtime secrets)
+frontend/public/config.js
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+tmp/

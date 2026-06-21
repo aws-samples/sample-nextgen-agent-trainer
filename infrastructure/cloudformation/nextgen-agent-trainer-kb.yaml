@@ -1,0 +1,421 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'NextGen Agent Trainer - Knowledge Base (AOSS + Bedrock KB)'
+
+Parameters:
+  AppName:
+    Type: String
+    Default: nextgen-agent-trainer
+    Description: Application name
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+  DataBucketName:
+    Type: String
+    Description: S3 bucket containing KB markdown files under kb/ prefix
+    AllowedPattern: ^nextgen-agent-trainer-data-[0-9]{12}$
+    ConstraintDescription: Must be in format nextgen-agent-trainer-data-{accountId}
+
+Resources:
+  # IAM Role for AOSS Index Creator Lambda
+  KBIndexRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AOSSIndexPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+
+  # IAM Role for Bedrock Knowledge Base
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AppName}-${Environment}-kb-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: KBDataBucketAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+        - PolicyName: KBEmbeddingModelAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+        - PolicyName: KBOpenSearchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource:
+                  - !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+
+  # OpenSearch Serverless - Encryption Policy
+  KBEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub 'nat-${Environment}-enc'
+      Type: encryption
+      Policy: !Sub '{"Rules":[{"ResourceType":"collection","Resource":["collection/nat-${Environment}-kb"]}],"AWSOwnedKey":true}'
+
+  # OpenSearch Serverless - Network Policy
+  KBNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub 'nat-${Environment}-net'
+      Type: network
+      Policy: !Sub '[{"Rules":[{"ResourceType":"collection","Resource":["collection/nat-${Environment}-kb"]},{"ResourceType":"dashboard","Resource":["collection/nat-${Environment}-kb"]}],"AllowFromPublic":true}]'
+
+  # OpenSearch Serverless - Data Access Policy
+  KBAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub 'nat-${Environment}-access'
+      Type: data
+      Policy: !Sub '[{"Rules":[{"ResourceType":"collection","Resource":["collection/nat-${Environment}-kb"],"Permission":["aoss:CreateCollectionItems","aoss:UpdateCollectionItems","aoss:DescribeCollectionItems"]},{"ResourceType":"index","Resource":["index/nat-${Environment}-kb/*"],"Permission":["aoss:CreateIndex","aoss:UpdateIndex","aoss:DescribeIndex","aoss:ReadDocument","aoss:WriteDocument"]}],"Principal":["${KnowledgeBaseRole.Arn}","${KBIndexRole.Arn}"]}]'
+
+  # OpenSearch Serverless Collection
+  KBCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - KBEncryptionPolicy
+      - KBNetworkPolicy
+      - KBAccessPolicy
+    Properties:
+      Name: !Sub 'nat-${Environment}-kb'
+      Type: VECTORSEARCH
+      Description: !Sub 'NextGen Agent Trainer ${Environment} knowledge base vector store'
+
+  # Lambda to pre-create the AOSS vector index with retry logic
+  # AOSS collections report CREATE_COMPLETE before the endpoint is fully ready.
+  # This Lambda retries with exponential backoff for up to ~4 minutes.
+  KBIndexFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: KBCollection
+    Properties:
+      FunctionName: !Sub '${AppName}-${Environment}-kb-index-creator'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt KBIndexRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const https = require('https');
+          const crypto = require('crypto');
+          const sign = (key, msg) => crypto.createHmac('sha256', key).update(msg).digest();
+          const getSignatureKey = (key, ds, region, svc) => {
+            return sign(sign(sign(sign('AWS4' + key, ds), region), svc), 'aws4_request');
+          };
+          const makeRequest = (options, body) => new Promise((resolve, reject) => {
+            const req = https.request(options, res => {
+              let data = '';
+              res.on('data', c => data += c);
+              res.on('end', () => resolve({ statusCode: res.statusCode, body: data }));
+            });
+            req.on('error', reject);
+            if (body) req.write(body);
+            req.end();
+          });
+          const buildAuthHeaders = (method, host, path, bodyStr, region) => {
+            const now = new Date();
+            const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+            const ds = amzDate.slice(0, 8);
+            const bodyHash = crypto.createHash('sha256').update(bodyStr).digest('hex');
+            const hdrs = {
+              'content-type': 'application/json', 'host': host,
+              'x-amz-content-sha256': bodyHash, 'x-amz-date': amzDate,
+              ...(process.env.AWS_SESSION_TOKEN ? { 'x-amz-security-token': process.env.AWS_SESSION_TOKEN } : {})
+            };
+            const sk = Object.keys(hdrs).sort();
+            const ch = sk.map(k => k + ':' + hdrs[k]).join('\n') + '\n';
+            const sh = sk.join(';');
+            const cr = [method, path, '', ch, sh, bodyHash].join('\n');
+            const cs = ds + '/' + region + '/aoss/aws4_request';
+            const sts = ['AWS4-HMAC-SHA256', amzDate, cs,
+              crypto.createHash('sha256').update(cr).digest('hex')].join('\n');
+            const sig = crypto.createHmac('sha256',
+              getSignatureKey(process.env.AWS_SECRET_ACCESS_KEY, ds, region, 'aoss'))
+              .update(sts).digest('hex');
+            return { ...hdrs,
+              'Authorization': 'AWS4-HMAC-SHA256 Credential=' + process.env.AWS_ACCESS_KEY_ID +
+                '/' + cs + ', SignedHeaders=' + sh + ', Signature=' + sig };
+          };
+          const sendCfnResponse = async (event, context, status, reason, physicalId) => {
+            const body = JSON.stringify({
+              Status: status, Reason: reason || 'See CloudWatch logs',
+              PhysicalResourceId: physicalId || context.logStreamName,
+              StackId: event.StackId, RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId, Data: {}
+            });
+            const url = new URL(event.ResponseURL);
+            await makeRequest({
+              hostname: url.hostname, port: 443,
+              path: url.pathname + url.search, method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+            }, body);
+          };
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          exports.handler = async (event, context) => {
+            console.log('Event:', JSON.stringify(event));
+            if (event.RequestType === 'Delete') {
+              return sendCfnResponse(event, context, 'SUCCESS', 'No cleanup needed', event.PhysicalResourceId);
+            }
+            try {
+              const { CollectionEndpoint, IndexName, Region } = event.ResourceProperties;
+              const host = CollectionEndpoint.replace(/^https?:\/\//, '');
+              const path = '/' + IndexName;
+              const indexBody = JSON.stringify({
+                settings: { index: { knn: true, 'knn.algo_param.ef_search': 512 } },
+                mappings: { properties: {
+                  vector: { type: 'knn_vector', dimension: 1024,
+                    method: { name: 'hnsw', space_type: 'l2', engine: 'faiss',
+                      parameters: { ef_construction: 512, m: 16 } } },
+                  text: { type: 'text' }, metadata: { type: 'text' }
+                } }
+              });
+              const MAX_RETRIES = 8;
+              let lastErr;
+              for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                if (attempt > 0) {
+                  const delay = Math.min(5000 * Math.pow(2, attempt - 1), 60000);
+                  console.log(`Retry ${attempt}/${MAX_RETRIES}, waiting ${delay}ms...`);
+                  await sleep(delay);
+                }
+                try {
+                  const headers = buildAuthHeaders('PUT', host, path, indexBody, Region);
+                  const resp = await makeRequest({
+                    hostname: host, port: 443, path, method: 'PUT',
+                    headers: { ...headers, 'Content-Length': Buffer.byteLength(indexBody) }
+                  }, indexBody);
+                  console.log(`Attempt ${attempt}: ${resp.statusCode} ${resp.body}`);
+                  if (resp.statusCode >= 200 && resp.statusCode < 300) {
+                    // Wait 30s for AOSS to fully propagate the index before Bedrock KB creation
+                    console.log('Index created, waiting 30s for AOSS propagation...');
+                    await sleep(30000);
+                    return sendCfnResponse(event, context, 'SUCCESS', 'Index created', IndexName);
+                  }
+                  if (resp.statusCode === 400) {
+                    const parsed = JSON.parse(resp.body || '{}');
+                    if (parsed.error?.type === 'resource_already_exists_exception') {
+                      return sendCfnResponse(event, context, 'SUCCESS', 'Index already exists', IndexName);
+                    }
+                  }
+                  if (resp.statusCode === 403 || resp.statusCode === 503) {
+                    lastErr = new Error('HTTP ' + resp.statusCode + ': ' + resp.body);
+                    continue;
+                  }
+                  throw new Error('HTTP ' + resp.statusCode + ': ' + resp.body);
+                } catch (err) {
+                  lastErr = err;
+                  if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ETIMEDOUT') {
+                    console.log(`Connection error (${err.code}), will retry...`);
+                    continue;
+                  }
+                  if (attempt < MAX_RETRIES - 1 && err.message?.includes('HTTP 503')) continue;
+                  throw err;
+                }
+              }
+              throw lastErr || new Error('Max retries exceeded');
+            } catch (err) {
+              console.error('Error:', err);
+              await sendCfnResponse(event, context, 'FAILED', err.message, event.PhysicalResourceId || 'error');
+            }
+          };
+
+  KBIndexCustomResource:
+    Type: Custom::KBVectorIndex
+    DependsOn:
+      - KBCollection
+      - KBAccessPolicy
+      - KBIndexFunction
+    Properties:
+      ServiceToken: !GetAtt KBIndexFunction.Arn
+      CollectionEndpoint: !GetAtt KBCollection.CollectionEndpoint
+      IndexName: !Sub 'nat-${Environment}-kb-index'
+      Region: !Ref AWS::Region
+
+  # Bedrock Knowledge Base
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: KBIndexCustomResource
+    Properties:
+      Name: !Sub '${AppName}-${Environment}-kb'
+      Description: 'Knowledge base for agent suggestions, organised by business vertical under kb/ prefix'
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt KBCollection.Arn
+          VectorIndexName: !Sub 'nat-${Environment}-kb-index'
+          FieldMapping:
+            VectorField: vector
+            TextField: text
+            MetadataField: metadata
+
+  # Bedrock Knowledge Base Data Source (S3 kb/ prefix only)
+  KnowledgeBaseDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: !Sub '${AppName}-${Environment}-kb-datasource'
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !Sub 'arn:aws:s3:::${DataBucketName}'
+          InclusionPrefixes:
+            - kb/
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: 512
+            OverlapPercentage: 20
+
+  # IAM Role for KB Sync Lambda
+  KBSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: KBSyncPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:StartIngestionJob
+                  - bedrock:GetIngestionJob
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*'
+
+  # Lambda Function to trigger KB ingestion sync
+  KBSyncFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-${Environment}-kb-sync'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt KBSyncRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          const { BedrockAgentClient, StartIngestionJobCommand } = require('@aws-sdk/client-bedrock-agent');
+          const https = require('https');
+          const url = require('url');
+          async function sendResponse(event, context, status, data) {
+            const body = JSON.stringify({
+              Status: status, Reason: data.Reason || `See CloudWatch: ${context.logStreamName}`,
+              PhysicalResourceId: data.PhysicalResourceId || 'kb-sync',
+              StackId: event.StackId, RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId, Data: data.Data || {}
+            });
+            const parsed = url.parse(event.ResponseURL);
+            return new Promise((resolve, reject) => {
+              const req = https.request({
+                hostname: parsed.hostname, port: 443, path: parsed.path,
+                method: 'PUT', headers: { 'Content-Type': '', 'Content-Length': body.length }
+              }, () => resolve());
+              req.on('error', reject);
+              req.write(body);
+              req.end();
+            });
+          }
+          exports.handler = async (event, context) => {
+            console.log('Event:', JSON.stringify(event));
+            const { RequestType, ResourceProperties } = event;
+            const { KnowledgeBaseId, DataSourceId } = ResourceProperties;
+            try {
+              if (RequestType === 'Delete') {
+                return sendResponse(event, context, 'SUCCESS', { PhysicalResourceId: 'kb-sync' });
+              }
+              const client = new BedrockAgentClient({});
+              const response = await client.send(new StartIngestionJobCommand({
+                knowledgeBaseId: KnowledgeBaseId, dataSourceId: DataSourceId
+              }));
+              console.log('Ingestion job started:', response.ingestionJob.ingestionJobId);
+              return sendResponse(event, context, 'SUCCESS', {
+                PhysicalResourceId: 'kb-sync',
+                Data: { IngestionJobId: response.ingestionJob.ingestionJobId }
+              });
+            } catch (error) {
+              console.error('Error:', error);
+              return sendResponse(event, context, 'FAILED', {
+                PhysicalResourceId: 'kb-sync', Reason: error.message
+              });
+            }
+          };
+
+  # Custom Resource to trigger KB sync on deploy
+  KBSyncCustomResource:
+    Type: Custom::KBSync
+    DependsOn:
+      - KnowledgeBaseDataSource
+      - KBSyncFunction
+    Properties:
+      ServiceToken: !GetAtt KBSyncFunction.Arn
+      KnowledgeBaseId: !Ref KnowledgeBase
+      DataSourceId: !GetAtt KnowledgeBaseDataSource.DataSourceId
+      DeployVersion: !Sub '${AWS::StackName}-${AWS::StackId}'
+
+Outputs:
+  KnowledgeBaseId:
+    Description: Bedrock Knowledge Base ID
+    Value: !Ref KnowledgeBase
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseId'
+
+  CollectionEndpoint:
+    Description: AOSS Collection Endpoint
+    Value: !GetAtt KBCollection.CollectionEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-CollectionEndpoint'

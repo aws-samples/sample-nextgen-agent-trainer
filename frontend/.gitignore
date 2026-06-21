@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+.DS_Store
+
+# Config.js is now dynamically generated - don't commit static versions
+public/config.js

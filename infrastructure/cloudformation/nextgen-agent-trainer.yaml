@@ -1,0 +1,1180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'NextGen Agent Trainer - Real-time Audio Streaming with AWS Bedrock Integration'
+
+Parameters:
+  AppName:
+    Type: String
+    Default: nextgen-agent-trainer
+    Description: Application name
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  DockerImageURI:
+    Type: String
+    Description: ECR Docker image URI for the application
+  
+  NovaModelId:
+    Type: String
+    Default: amazon.nova-sonic-v1:0
+    Description: Bedrock Nova model ID for speech-to-speech
+  
+  ReasoningModelId:
+    Type: String
+    Default: us.anthropic.claude-3-5-sonnet-20241022-v2:0
+    Description: Bedrock model ID for agent suggestions and reasoning
+
+  SuggestionsModelId:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: Bedrock inference profile ID for AI suggestions (smaller/faster model)
+
+  KbScoreThreshold:
+    Type: String
+    Default: '0.35'
+    Description: Minimum Bedrock KB retrieval score to trigger an agent suggestion (0.0-1.0)
+
+  DataBucketName:
+    Type: String
+    Description: S3 bucket containing scenario JSON files (format nextgen-agent-trainer-data-{accountId})
+    AllowedPattern: ^nextgen-agent-trainer-data-[0-9]{12}$
+    ConstraintDescription: Must be in format nextgen-agent-trainer-data-{accountId}
+
+  KnowledgeBaseId:
+    Type: String
+    Default: ''
+    Description: Bedrock Knowledge Base ID (set after KB stack deploys)
+
+  DeployTimestamp:
+    Type: String
+    Default: '0'
+    Description: Epoch timestamp to force scenario reload on every deploy
+
+Conditions:
+  HasKnowledgeBase: !Not [!Equals [!Ref KnowledgeBaseId, '']]
+
+Resources:
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-vpc'
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-igw'
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-public-subnet-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-public-subnet-2'
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-public-subnet-3'
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.11.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-private-subnet-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.12.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-private-subnet-2'
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: 10.0.13.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-private-subnet-3'
+
+  # NAT Gateways
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway3EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  NatGateway3:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway3EIP.AllocationId
+      SubnetId: !Ref PublicSubnet3
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-public-routes'
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet3
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-private-routes-1'
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-private-routes-2'
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateRouteTable3:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-private-routes-3'
+
+  DefaultPrivateRoute3:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway3
+
+  PrivateSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3
+      SubnetId: !Ref PrivateSubnet3
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AppName}-${Environment}-users'
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CloudFrontDistribution
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub '${AppName}-${Environment}-client'
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - COGNITO
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Sub 'https://${CloudFrontDistribution.DomainName}/'
+        - 'http://localhost:3000/'
+      LogoutURLs:
+        - !Sub 'https://${CloudFrontDistribution.DomainName}/'
+        - 'http://localhost:3000/'
+
+  # Cognito User Pool Domain
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub '${AppName}-${Environment}-${AWS::AccountId}'
+
+  # S3 Bucket for transcripts (matches TRANSCRIPT_BUCKET_NAME)
+  TranscriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AppName}-${Environment}-transcripts-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldTranscripts
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # S3 Bucket for React frontend SPA (accessed via CloudFront OAC only)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AppName}-${Environment}-frontend-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AppName}-${Environment}-frontend-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: CloudFrontDistribution
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # DynamoDB Table for scenarios (matches actual usage)
+  ScenariosTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-${Environment}-scenarios'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-scenarios'
+
+  # Lambda Execution Role for Scenario Loader
+  ScenarioLoaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ScenarioLoaderPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt ScenariosTable.Arn
+
+  # Lambda Function for Scenario Loader
+  ScenarioLoaderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-${Environment}-scenario-loader'
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt ScenarioLoaderRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DATA_BUCKET_NAME: !Ref DataBucketName
+          SCENARIOS_TABLE_NAME: !Ref ScenariosTable
+      Code:
+        ZipFile: |
+          const { S3Client, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
+          const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+          const { DynamoDBDocumentClient, BatchWriteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+
+          const s3Client = new S3Client({});
+          const dynamoClient = new DynamoDBClient({});
+          const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+          async function sendCfnResponse(event, context, status, data) {
+              const responseBody = JSON.stringify({
+                  Status: status,
+                  Reason: data.Reason || `See CloudWatch Log Stream: ${context.logStreamName}`,
+                  PhysicalResourceId: data.PhysicalResourceId || context.logStreamName,
+                  StackId: event.StackId,
+                  RequestId: event.RequestId,
+                  LogicalResourceId: event.LogicalResourceId,
+                  Data: data.Data || {}
+              });
+
+              const https = require('https');
+              const url = require('url');
+              const parsedUrl = url.parse(event.ResponseURL);
+
+              const options = {
+                  hostname: parsedUrl.hostname,
+                  port: 443,
+                  path: parsedUrl.path,
+                  method: 'PUT',
+                  headers: { 'Content-Type': '', 'Content-Length': responseBody.length }
+              };
+
+              return new Promise((resolve, reject) => {
+                  const req = https.request(options, (res) => { console.log(`CFN response status: ${res.statusCode}`); resolve(); });
+                  req.on('error', reject);
+                  req.write(responseBody);
+                  req.end();
+              });
+          }
+
+          async function clearTable(tableName) {
+              console.log(`Clearing all items from ${tableName}...`);
+              let lastEvaluatedKey = undefined;
+              let deletedCount = 0;
+              do {
+                  const scanResult = await docClient.send(new ScanCommand({
+                      TableName: tableName,
+                      ProjectionExpression: 'PK, SK',
+                      ExclusiveStartKey: lastEvaluatedKey,
+                  }));
+                  const items = scanResult.Items || [];
+                  for (let i = 0; i < items.length; i += 25) {
+                      const batch = items.slice(i, i + 25);
+                      await docClient.send(new BatchWriteCommand({
+                          RequestItems: {
+                              [tableName]: batch.map(item => ({ DeleteRequest: { Key: { PK: item.PK, SK: item.SK } } }))
+                          }
+                      }));
+                      deletedCount += batch.length;
+                  }
+                  lastEvaluatedKey = scanResult.LastEvaluatedKey;
+              } while (lastEvaluatedKey);
+              console.log(`Cleared ${deletedCount} items from ${tableName}`);
+          }
+
+          async function loadScenariosFromS3(bucketName, tableName) {
+              console.log(`Loading scenarios from s3://${bucketName}/scenarios/`);
+              const listResponse = await s3Client.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: 'scenarios/' }));
+              const jsonFiles = (listResponse.Contents || []).filter(obj => obj.Key.endsWith('.json'));
+              console.log(`Found ${jsonFiles.length} JSON files`);
+              let totalScenarios = 0;
+              for (const file of jsonFiles) {
+                  console.log(`Processing ${file.Key}...`);
+                  const getResponse = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: file.Key }));
+                  const content = await new Promise((resolve, reject) => {
+                      const chunks = [];
+                      getResponse.Body.on('data', c => chunks.push(c));
+                      getResponse.Body.on('error', reject);
+                      getResponse.Body.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+                  });
+                  const data = JSON.parse(content);
+                  const items = data.scenarios.map(scenario => ({
+                      PK: `BUSINESS#${data.businessName}`,
+                      SK: `SCENARIO#${scenario.scenarioId}`,
+                      scenarioId: scenario.scenarioId,
+                      businessName: data.businessName,
+                      personaName: scenario.personaName,
+                      scenarioName: scenario.scenarioName,
+                      voiceId: scenario.voiceId,
+                      demographics: scenario.demographics,
+                      behavior: scenario.behavior,
+                      customerObjectives: scenario.customerObjectives,
+                      agentObjectives: scenario.agentObjectives,
+                      prompt: scenario.prompt,
+                      createdAt: new Date().toISOString(),
+                      updatedAt: new Date().toISOString(),
+                  }));
+                  for (let i = 0; i < items.length; i += 25) {
+                      await docClient.send(new BatchWriteCommand({
+                          RequestItems: { [tableName]: items.slice(i, i + 25).map(item => ({ PutRequest: { Item: item } })) }
+                      }));
+                      totalScenarios += items.slice(i, i + 25).length;
+                  }
+                  console.log(`Loaded ${items.length} scenarios from ${file.Key}`);
+              }
+              return totalScenarios;
+          }
+
+          exports.handler = async (event, context) => {
+              console.log('Event:', JSON.stringify(event, null, 2));
+
+              // Direct invocation (e.g. from preparedata.sh) — no CFN ResponseURL
+              const isCfnInvocation = !!event.ResponseURL;
+
+              // Resolve config: CFN passes ResourceProperties; direct calls use env vars
+              const bucketName = (event.ResourceProperties && event.ResourceProperties.DataBucketName) || process.env.DATA_BUCKET_NAME;
+              const tableName  = (event.ResourceProperties && event.ResourceProperties.ScenariosTableName) || process.env.SCENARIOS_TABLE_NAME;
+              const requestType = event.RequestType || 'Update';
+
+              try {
+                  if (requestType === 'Delete') {
+                      if (isCfnInvocation) await sendCfnResponse(event, context, 'SUCCESS', { PhysicalResourceId: 'ScenarioLoader', Data: { Message: 'Delete completed' } });
+                      return { message: 'Delete: no-op' };
+                  }
+
+                  await clearTable(tableName);
+                  const totalScenarios = await loadScenariosFromS3(bucketName, tableName);
+                  console.log(`Successfully loaded ${totalScenarios} scenarios`);
+
+                  if (isCfnInvocation) {
+                      await sendCfnResponse(event, context, 'SUCCESS', {
+                          PhysicalResourceId: 'ScenarioLoader',
+                          Data: { Message: `Successfully loaded ${totalScenarios} scenarios`, TotalScenarios: totalScenarios }
+                      });
+                  }
+                  return { message: `Loaded ${totalScenarios} scenarios` };
+
+              } catch (error) {
+                  console.error('Error:', error);
+                  if (isCfnInvocation) await sendCfnResponse(event, context, 'FAILED', { PhysicalResourceId: 'ScenarioLoader', Reason: error.message });
+                  throw error;
+              }
+          };
+
+  # Custom Resource to trigger scenario loading
+  ScenarioLoaderCustomResource:
+    Type: Custom::ScenarioLoader
+    DependsOn:
+      - ScenariosTable
+      - ScenarioLoaderFunction
+    Properties:
+      ServiceToken: !GetAtt ScenarioLoaderFunction.Arn
+      DataBucketName: !Ref DataBucketName
+      ScenariosTableName: !Ref ScenariosTable
+      # Force re-run on every deploy by passing a changing timestamp
+      DeployTimestamp: !Ref DeployTimestamp
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AppName}-${Environment}'
+
+  # ECS Task Definition
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AppName}-${Environment}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub '${AppName}-container'
+          Image: !Ref DockerImageURI
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: TRANSCRIPT_BUCKET_NAME
+              Value: !Ref TranscriptsBucket
+            - Name: SCENARIOS_TABLE_NAME
+              Value: !Ref ScenariosTable
+            - Name: COGNITO_USER_POOL_ID
+              Value: !Ref UserPool
+            - Name: COGNITO_CLIENT_ID
+              Value: !Ref UserPoolClient
+            - Name: COGNITO_DOMAIN
+              Value: !Sub '${AppName}-${Environment}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com'
+            - Name: COGNITO_REDIRECT_URI
+              Value: !Sub 'https://${CloudFrontDistribution.DomainName}/'
+            - Name: KNOWLEDGE_BASE_ID
+              Value: !Ref KnowledgeBaseId
+            - Name: DATA_BUCKET_NAME
+              Value: !Ref DataBucketName
+            - Name: NOVA_MODEL_ID
+              Value: !Ref NovaModelId
+            - Name: REASONING_MODEL_ID
+              Value: !Ref ReasoningModelId
+            - Name: SUGGESTIONS_MODEL_ID
+              Value: !Ref SuggestionsModelId
+            - Name: KB_SCORE_THRESHOLD
+              Value: !Ref KbScoreThreshold
+            - Name: EVALUATIONS_TABLE_NAME
+              Value: !Ref EvaluationsTable
+            - Name: CLOUDFRONT_DOMAIN
+              Value: !GetAtt CloudFrontDistribution.DomainName
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub '${AppName}-${Environment}'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 1
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+            - !Ref PrivateSubnet3
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: !Sub '${AppName}-container'
+          ContainerPort: 3000
+          TargetGroupArn: !Ref TargetGroup
+
+  # Application Load Balancer
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AppName}-${Environment}-alb'
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+        - !Ref PublicSubnet3
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+        - Key: routing.http2.enabled
+          Value: true
+        - Key: access_logs.s3.enabled
+          Value: false
+        - Key: deletion_protection.enabled
+          Value: false
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AppName}-${Environment}-tg'
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 86400
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+  # Response Headers Policy — allows Amazon Connect to embed NAT in an iframe
+  ConnectFramingHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AppName}-${Environment}-connect-framing'
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "frame-ancestors 'self' https://*.awsapps.com https://*.my.connect.aws"
+            Override: true
+          FrameOptions:
+            FrameOption: SAMEORIGIN
+            Override: false
+        CustomHeadersConfig:
+          Items:
+            - Header: Permissions-Policy
+              Value: microphone=*
+              Override: true
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: ALBOrigin
+            DomainName: !GetAtt ALB.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !GetAtt FrontendBucketOAC.Id
+        CacheBehaviors:
+          # WebSocket/Socket.IO - no caching, forward all
+          - PathPattern: '/socket.io/*'
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            ForwardedValues:
+              QueryString: true
+              Headers:
+                - Origin
+                - Sec-WebSocket-Key
+                - Sec-WebSocket-Version
+                - Sec-WebSocket-Protocol
+                - Sec-WebSocket-Accept
+                - Sec-WebSocket-Extensions
+              Cookies:
+                Forward: all
+            DefaultTTL: 0
+            MaxTTL: 0
+            MinTTL: 0
+            Compress: false
+          # Auth endpoints - no caching
+          - PathPattern: '/auth/*'
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            ForwardedValues:
+              QueryString: true
+              Headers:
+                - '*'
+              Cookies:
+                Forward: all
+            DefaultTTL: 0
+            MaxTTL: 0
+            MinTTL: 0
+            Compress: false
+          # API endpoints - no caching
+          - PathPattern: '/api/*'
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            ForwardedValues:
+              QueryString: true
+              Headers:
+                - Authorization
+                - Content-Type
+              Cookies:
+                Forward: all
+            DefaultTTL: 0
+            MaxTTL: 0
+            MinTTL: 0
+            Compress: true
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          DefaultTTL: 86400
+          MaxTTL: 31536000
+          MinTTL: 0
+          Compress: true
+          ResponseHeadersPolicyId: !Ref ConnectFramingHeadersPolicy
+        Enabled: true
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        Comment: !Sub '${AppName} ${Environment} Distribution'
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W9
+            reason: "ALB requires inbound access from internet for public-facing application"
+          - id: W2
+            reason: "ALB requires inbound access from internet for public-facing application"
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP traffic from internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS traffic from internet
+
+  # Separate egress rule to avoid circular dependency
+  ALBSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      DestinationSecurityGroupId: !Ref ECSSecurityGroup
+      Description: Allow traffic to ECS tasks on port 3000
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS tasks
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from ALB on port 3000
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS outbound for AWS API calls (Bedrock, DynamoDB, S3, etc.)
+
+  ECSSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ECSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref ECSSecurityGroup
+      Description: Allow HTTPS from ECS tasks to VPC endpoint
+
+  # IAM Roles
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Nova Sonic model access
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${NovaModelId}'
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/${NovaModelId}'
+                  - !Sub 'arn:aws:bedrock:us-west-2::foundation-model/${NovaModelId}'
+              # Anthropic models access (all regions)
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${ReasoningModelId}'
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/${ReasoningModelId}'
+                  - !Sub 'arn:aws:bedrock:us-west-2::foundation-model/${ReasoningModelId}'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-*'
+                  - !Sub 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*'
+                  - !Sub 'arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-*'
+              # Inference profiles for cross-region models
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+              # Cross-region inference
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - 'arn:aws:bedrock:*::foundation-model/amazon.nova-*'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-*'
+        - PolicyName: KnowledgeBaseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*'
+        - PolicyName: S3TranscriptsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${TranscriptsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt TranscriptsBucket.Arn
+        - PolicyName: DynamoDBScenariosAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt ScenariosTable.Arn
+        - PolicyName: DynamoDBEvaluationsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt EvaluationsTable.Arn
+                  - !Sub '${EvaluationsTable.Arn}/index/*'
+
+  # CloudWatch Log Group
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AppName}-${Environment}'
+      RetentionInDays: 7
+
+  # ============================================================================
+  # EVALUATIONS RESOURCES
+  # ============================================================================
+
+  # DynamoDB Table for Evaluations
+  # Note: To add GSI, delete table first or create new table with different name
+  EvaluationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-${Environment}-evaluations'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: user_name
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: transcript_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: user_name-timestamp-index
+          KeySchema:
+            - AttributeName: user_name
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: transcript_hash-index
+          KeySchema:
+            - AttributeName: transcript_hash
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-evaluations'
+
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PublicSubnets:
+    Description: Public subnet IDs
+    Value: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2, !Ref PublicSubnet3]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnets'
+
+  PrivateSubnets:
+    Description: Private subnet IDs
+    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2, !Ref PrivateSubnet3]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnets'
+
+  CloudFrontURL:
+    Description: CloudFront Distribution URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontURL'
+
+  ALBEndpoint:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBEndpoint'
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolId'
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolClientId'
+
+  UserPoolDomain:
+    Description: Cognito User Pool Domain
+    Value: !Ref UserPoolDomain
+    Export:
+      Name: !Sub '${AWS::StackName}-UserPoolDomain'
+
+  TranscriptsBucketName:
+    Description: S3 Bucket for transcripts
+    Value: !Ref TranscriptsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-TranscriptsBucket'
+
+  ScenariosTableName:
+    Description: DynamoDB Scenarios Table Name
+    Value: !Ref ScenariosTable
+    Export:
+      Name: !Sub '${AWS::StackName}-ScenariosTable'
+
+  EvaluationsTableName:
+    Description: Evaluations DynamoDB table name
+    Value: !Ref EvaluationsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-EvaluationsTableName'
+
+  FrontendBucketName:
+    Description: S3 Bucket for React frontend
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendBucketName'
+
+  KnowledgeBaseId:
+    Condition: HasKnowledgeBase
+    Description: Bedrock Knowledge Base ID
+    Value: !Ref KnowledgeBaseId
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseId'
+

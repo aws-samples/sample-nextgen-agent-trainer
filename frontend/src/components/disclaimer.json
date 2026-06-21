@@ -1,0 +1,17 @@
+{
+    "privacyModal": {
+      "title": "Statement on Collection and Use of Personal Information",
+      "mandatory": "By clicking the \"Agree\" button, you agree to the Statement on Collection and Use of Personal Information (see below) for <0>AWS Code of Conduct</0>",
+      "mandatoryLink": "https://aws.amazon.com/codeofconduct/?nc1=h_ls",
+      "description": "It does not modify or supersede any of the terms of the <0>AWS Privacy Notice</0>",
+      "descriptionLink": "https://aws.amazon.com/en/privacy/?nc1=h_ls",
+      "instruction": "Do not provide any personal information, for example, full name, email address, phone number.",
+      "collectedItemTitle": "Collected Items",
+      "collectedItemDesc": "Voice and conversation transcript at AWS summit 2026",
+      "collectionUsePurposeTitle": "Collection and Use Purpose",
+      "collectionUsePurposeDesc": "Voice input will be transcribed by Amazon Nova Sonic (Amazon's speech to speech foundation model). The conversation transcript will be processed by Generative AI models on Amazon Bedrock.",
+      "retentionPeriodTitle": "Retention Period",
+      "retentionPeriodDesc": "Voice data will be deleted immediately upon processing. The transcript will be deleted at the end AWS Summit 2026."
+    }
+  }
+  
