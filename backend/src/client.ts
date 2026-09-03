@@ -326,8 +326,14 @@ export class NovaSonicBidirectionalStreamClient {
       // Process responses for this session
       await this.processResponseStream(sessionId, response);
 
-    } catch (error) {
+    } catch (error: any) {
       logger.error(`Error in session ${sessionId}: `, error);
+      // Access the hidden $response field directly
+      const rawResponse = (error as any).$response;
+      logger.error(`Error in session ${sessionId}: `, error);
+      logger.error(`Raw response body: `, rawResponse?.body);
+      logger.error(`Raw response headers: `, rawResponse?.headers);
+      logger.error(`Raw response status: `, rawResponse?.statusCode);
       this.dispatchEventForSession(sessionId, 'error', {
         source: 'bidirectionalStream',
         error
