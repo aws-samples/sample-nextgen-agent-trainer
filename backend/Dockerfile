@@ -2,6 +2,9 @@
 # Reference: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-tasks-containers.html
 FROM --platform=linux/amd64 node:22-alpine AS builder
 
+# Patch OS-level vulnerabilities in builder stage
+RUN apk upgrade --no-cache
+
 WORKDIR /app
 
 # Copy package files first for better layer caching
