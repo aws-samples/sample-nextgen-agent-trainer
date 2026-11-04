@@ -80,6 +80,28 @@ fi
 echo "Step 2 complete"
 
 # ============================================================
+# Step 2b: Clean up S3 Vectors resources (if used)
+# ============================================================
+KB_VECTOR_STORE_TYPE=$(aws cloudformation describe-stacks \
+  --stack-name $KB_STACK_NAME --region "$REGION" \
+  --query "Stacks[0].Parameters[?ParameterKey=='VectorStoreType'].ParameterValue" \
+  --output text 2>/dev/null || echo "OPENSEARCH_SERVERLESS")
+
+if [ "$KB_VECTOR_STORE_TYPE" = "S3_VECTORS" ]; then
+  echo "" \
+  echo "Step 2b: Deleting S3 Vectors ..." \
+  VECTOR_BUCKET=$(aws cloudformation describe-stacks \
+    --stack-name $KB_STACK_NAME --region "$REGION" \
+    --query "Stacks[0].Outputs[?OutputKey=='VectorBucketName'].OutputValue" \
+    --output text 2>/dev/null || echo "")
+  if [ -n "$VECTOR_BUCKET" ]; then
+    # Delete vectors from all indexes, then delete the bucket
+    # S3 vector buckets can only be deleted when empty
+    aws s3vectors delete-vector-bucket --vector-bucket-name "$VECTOR_BUCKET" --region "$REGION" || true
+  fi
+fi
+
+# ============================================================
 # Step 3: Delete main stack (buckets already empty)
 # ============================================================
 echo ""
