@@ -14,6 +14,7 @@ NOVA_MODEL_ID="${1:-amazon.nova-2-sonic-v1:0}"
 REASONING_MODEL_ID="${2:-global.anthropic.claude-sonnet-4-5-20250929-v1:0}"
 SUGGESTIONS_MODEL_ID="${SUGGESTIONS_MODEL_ID:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"
 KB_SCORE_THRESHOLD="${KB_SCORE_THRESHOLD:-0.5}"
+VECTOR_STORE_TYPE="${VECTOR_STORE_TYPE:-OPENSEARCH_SERVERLESS}"
 
 # Get AWS Account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -104,6 +105,7 @@ else
       --stack-name $KB_STACK_NAME \
       --parameter-overrides \
         DataBucketName="$DATA_BUCKET_NAME" \
+        VectorStoreType="$VECTOR_STORE_TYPE" \
       --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
       --region "$REGION"
 
@@ -157,6 +159,7 @@ echo "   ClientId:        $COGNITO_CLIENT_ID"
 echo "   CognitoDomain:   $COGNITO_DOMAIN"
 echo "   CloudFrontDomain: $CLOUDFRONT_DOMAIN"
 echo "   FrontendBucket:  $FRONTEND_BUCKET"
+echo "   Vector Store:    $VECTOR_STORE_TYPE"
 echo "   KnowledgeBaseId: $KB_ID"
 echo "Step 4 complete"
 

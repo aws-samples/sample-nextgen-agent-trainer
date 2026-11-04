@@ -46,7 +46,7 @@ const searchKnowledgeBase = async (params: SearchKnowledgeBaseParams): Promise<R
         const dataBucket = process.env.DATA_BUCKET_NAME;
         const verticalFilter = params.businessName && dataBucket
             ? {
-                startsWith: {
+                equals: {
                     key: 'x-amz-bedrock-kb-source-uri',
                     value: `s3://${dataBucket}/kb/${params.businessName}/`
                 }

@@ -19,9 +19,20 @@ Parameters:
     AllowedPattern: ^nextgen-agent-trainer-data-[0-9]{12}$
     ConstraintDescription: Must be in format nextgen-agent-trainer-data-{accountId}
 
+  VectorStoreType:
+    Type: String
+    Default: OPENSEARCH_SERVERLESS
+    AllowedValues: [OPENSEARCH_SERVERLESS, S3_VECTORS]
+    Description: Vector store backend for the Bedrock Knowledge Base
+
+Conditions:
+  IsAOSS: !Equals [!Ref VectorStoreType, OPENSEARCH_SERVERLESS]
+  IsS3Vectors: !Equals [!Ref VectorStoreType, S3_VECTORS]
+
 Resources:
   # IAM Role for AOSS Index Creator Lambda
   KBIndexRole:
+    Condition: IsAOSS
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -78,18 +89,38 @@ Resources:
                   - bedrock:InvokeModel
                 Resource:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
-        - PolicyName: KBOpenSearchAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - aoss:APIAccessAll
-                Resource:
-                  - !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+        - !If
+          - IsS3Vectors
+          - PolicyName: KBS3VectorsAccess
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3vectors:PutVectors
+                    - s3vectors:GetVectors
+                    - s3vectors:DeleteVectors
+                    - s3vectors:QueryVectors
+                    - s3vectors:GetIndex
+                  # !GetAtt returns the exact ARN Bedrock needs — no string interpolation
+                  Resource: !GetAtt S3VectorIndex.IndexArn
+          - !Ref AWS::NoValue
+        - !If
+          - IsAOSS
+          - PolicyName: KBOpenSearchAccess
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - aoss:APIAccessAll
+                  Resource:
+                    - !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+          - !Ref AWS::NoValue
 
   # OpenSearch Serverless - Encryption Policy
   KBEncryptionPolicy:
+    Condition: IsAOSS
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
       Name: !Sub 'nat-${Environment}-enc'
@@ -98,6 +129,7 @@ Resources:
 
   # OpenSearch Serverless - Network Policy
   KBNetworkPolicy:
+    Condition: IsAOSS
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
       Name: !Sub 'nat-${Environment}-net'
@@ -106,6 +138,7 @@ Resources:
 
   # OpenSearch Serverless - Data Access Policy
   KBAccessPolicy:
+    Condition: IsAOSS
     Type: AWS::OpenSearchServerless::AccessPolicy
     Properties:
       Name: !Sub 'nat-${Environment}-access'
@@ -114,6 +147,7 @@ Resources:
 
   # OpenSearch Serverless Collection
   KBCollection:
+    Condition: IsAOSS
     Type: AWS::OpenSearchServerless::Collection
     DependsOn:
       - KBEncryptionPolicy
@@ -128,6 +162,7 @@ Resources:
   # AOSS collections report CREATE_COMPLETE before the endpoint is fully ready.
   # This Lambda retries with exponential backoff for up to ~4 minutes.
   KBIndexFunction:
+    Condition: IsAOSS
     Type: AWS::Lambda::Function
     DependsOn: KBCollection
     Properties:
@@ -261,6 +296,7 @@ Resources:
           };
 
   KBIndexCustomResource:
+    Condition: IsAOSS
     Type: Custom::KBVectorIndex
     DependsOn:
       - KBCollection
@@ -272,10 +308,44 @@ Resources:
       IndexName: !Sub 'nat-${Environment}-kb-index'
       Region: !Ref AWS::Region
 
+  # S3 Vector Bucket
+  S3VectorBucket:
+    Condition: IsS3Vectors
+    Type: AWS::S3Vectors::VectorBucket
+    Properties:
+      VectorBucketName: !Sub 'nat-${Environment}-vectors-${AWS::AccountId}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AppName}-${Environment}-vectors'
+
+  # S3 Vector Index (dimension matches Titan Embeddings v2 = 1024)
+  # !Ref S3VectorBucket returns the bucket ARN, so we use VectorBucketArn
+  # (not VectorBucketName, which expects just the name and has a 63-char limit).
+  S3VectorIndex:
+    Condition: IsS3Vectors
+    Type: AWS::S3Vectors::Index
+    Properties:
+      VectorBucketArn: !GetAtt S3VectorBucket.VectorBucketArn
+      IndexName: !Sub 'nat-${Environment}-kb-index'
+      Dimension: 1024
+      DistanceMetric: cosine
+      DataType: float32
+      MetadataConfiguration:
+        NonFilterableMetadataKeys:
+          - AMAZON_BEDROCK_METADATA
+          - AMAZON_BEDROCK_TEXT
+
   # Bedrock Knowledge Base
+  # Note: No explicit DependsOn — CloudFormation rejects DependsOn on
+  # conditional resources even when the condition is true. Instead, implicit
+  # dependencies are created through property references:
+  # - S3 Vectors path: StorageConfiguration references S3VectorIndex/S3VectorBucket
+  # - AOSS path: StorageConfiguration references KBCollection, and Tags references
+  #   KBIndexCustomResource (the Lambda that creates the AOSS vector index).
+  # Fn::If evaluates only the matching branch, so the skipped resource is
+  # never resolved — no "Unresolved resource dependencies" error.
   KnowledgeBase:
     Type: AWS::Bedrock::KnowledgeBase
-    DependsOn: KBIndexCustomResource
     Properties:
       Name: !Sub '${AppName}-${Environment}-kb'
       Description: 'Knowledge base for agent suggestions, organised by business vertical under kb/ prefix'
@@ -284,15 +354,27 @@ Resources:
         Type: VECTOR
         VectorKnowledgeBaseConfiguration:
           EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
-      StorageConfiguration:
-        Type: OPENSEARCH_SERVERLESS
-        OpensearchServerlessConfiguration:
-          CollectionArn: !GetAtt KBCollection.Arn
-          VectorIndexName: !Sub 'nat-${Environment}-kb-index'
-          FieldMapping:
-            VectorField: vector
-            TextField: text
-            MetadataField: metadata
+      StorageConfiguration: !If
+        - IsS3Vectors
+        - Type: S3_VECTORS
+          S3VectorsConfiguration:
+            IndexArn: !GetAtt S3VectorIndex.IndexArn
+        - Type: OPENSEARCH_SERVERLESS
+          OpensearchServerlessConfiguration:
+            CollectionArn: !GetAtt KBCollection.Arn
+            VectorIndexName: !Sub 'nat-${Environment}-kb-index'
+            FieldMapping:
+              VectorField: vector
+              TextField: text
+              MetadataField: metadata
+      # Tags creates an implicit dependency on KBIndexCustomResource for the
+      # AOSS path (the custom resource that creates the AOSS vector index).
+      # Without this, the KB could be created before the index exists.
+      # !Ref KBIndexCustomResource resolves to the index name string.
+      Tags: !If
+        - IsAOSS
+        - VectorIndexReady: !Ref KBIndexCustomResource
+        - {}
 
   # Bedrock Knowledge Base Data Source (S3 kb/ prefix only)
   KnowledgeBaseDataSource:
@@ -415,7 +497,13 @@ Outputs:
       Name: !Sub '${AWS::StackName}-KnowledgeBaseId'
 
   CollectionEndpoint:
+    Condition: IsAOSS
     Description: AOSS Collection Endpoint
     Value: !GetAtt KBCollection.CollectionEndpoint
     Export:
       Name: !Sub '${AWS::StackName}-CollectionEndpoint'
+
+  VectorBucketName:
+    Condition: IsS3Vectors
+    Description: S3 Vector bucket name (for cleanup)
+    Value: !Sub 'nat-${Environment}-vectors-${AWS::AccountId}'

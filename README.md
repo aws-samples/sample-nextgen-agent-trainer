@@ -32,6 +32,7 @@ This application addresses these challenges by providing:
 - The following functionality is not included in the sample:
   - Update scenario and delete scenario
   - Modify evaluation criteria
+- Switching vector store types requires cleanup.sh + redeploy
 - The application is only supported on Google Chrome.
 
 ## Quick Start
@@ -226,7 +227,12 @@ All configuration is managed via CloudFormation parameters and deploy.sh default
 | `SuggestionsModelId` | Claude model for real-time agent suggestions | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `KbScoreThreshold` | Min Bedrock KB retrieval score to show a suggestion (0–1) | `0.5` |
 | `DataBucketName` | S3 bucket with scenarios and KB files | `nextgen-agent-trainer-data-{accountId}` |
+| `VectorStoreType` | Vector store type for the Knowledge Base | `OPENSEARCH_SERVERLESS` |
 | `KnowledgeBaseId` | Bedrock KB ID — set automatically after KB stack deploys | _(auto)_ |
+
+
+Deploy with S3 Vectors (default: OPENSEARCH_SERVERLESS)
+VECTOR_STORE_TYPE=S3_VECTORS ./scripts/deploy.sh
 
 `SuggestionsModelId` and `KbScoreThreshold` can be overridden at deploy time via env vars:
 ```bash
